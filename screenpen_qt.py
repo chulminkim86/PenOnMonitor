@@ -27,12 +27,13 @@ import traceback
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QBuffer, QByteArray, QPointF, QRectF, Qt, QTimer, QUrl
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QImage, QPainter,
+                           QTextCharFormat, QTextCursor, QTextDocument,
                            QPainterPath, QPen, QPixmap, QSurfaceFormat)
 from PySide6.QtWidgets import (QApplication, QGraphicsPathItem,
                                QGraphicsRectItem, QGraphicsScene, QGraphicsView,
-                               QWidget)
+                               QTextEdit, QWidget)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 import winbits as wb
@@ -789,6 +790,69 @@ class GlassBar(QWidget):
             self.refresh_glass()           # 옮긴 자리의 배경으로 다시 흐린다
 
 
+MEMO_IMG_MAX_W = 1400          # 붙여넣은 그림이 이보다 넓으면 줄인다
+MEMO_IMG_EXT = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
+
+
+def image_to_data_uri(img):
+    """그림을 문서 안에 통째로 담을 수 있는 문자열로 바꾼다.
+
+    파일을 따로 두면 USB 로 옮길 때 흩어지므로, HTML 한 장에 base64 로 넣는다.
+    """
+    if img.width() > MEMO_IMG_MAX_W:
+        img = img.scaledToWidth(MEMO_IMG_MAX_W, Qt.SmoothTransformation)
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QBuffer.WriteOnly)
+    img.save(buf, "PNG")
+    buf.close()
+    return "data:image/png;base64," + bytes(ba.toBase64()).decode("ascii")
+
+
+class MemoEdit(QTextEdit):
+    """메모장 + 그림 붙여넣기.
+
+    글은 메모장처럼 서식 없이 들어가고, 그림만 그림으로 들어간다.
+    웹에서 복사한 글씨 크기나 색이 딸려 들어오지 않게 하려는 것이다.
+    """
+
+    def insertFromMimeData(self, src):
+        img = self._image_of(src)
+        if img is not None:
+            self.insert_image(img)
+            return
+        if src.hasUrls():
+            put = False
+            for u in src.urls():
+                path = u.toLocalFile()
+                if path and os.path.splitext(path)[1].lower() in MEMO_IMG_EXT:
+                    im = QImage(path)
+                    if not im.isNull():
+                        self.insert_image(im)
+                        put = True
+            if put:
+                return
+        self.insertPlainText(src.text())
+
+    @staticmethod
+    def _image_of(src):
+        if not src.hasImage():
+            return None
+        data = src.imageData()
+        if isinstance(data, QImage):
+            img = data
+        elif isinstance(data, QPixmap):
+            img = data.toImage()
+        else:
+            return None
+        return img if not img.isNull() else None
+
+    def insert_image(self, img):
+        uri = image_to_data_uri(img)
+        self.document().addResource(QTextDocument.ImageResource, QUrl(uri), img)
+        self.textCursor().insertImage(uri)
+
+
 class Memo(QWidget):
     """메모장. Tk 판과 같은 규칙으로 동작한다."""
 
@@ -797,10 +861,10 @@ class Memo(QWidget):
 
     def __init__(self, app):
         super().__init__()
-        from PySide6.QtWidgets import (QCheckBox, QPlainTextEdit, QVBoxLayout,
-                                       QFrame)
+        from PySide6.QtWidgets import QCheckBox, QVBoxLayout, QFrame
         self.app = app
-        self.path = os.path.join(DATA_DIR, "memo.txt")
+        self.html_path = os.path.join(DATA_DIR, "memo.html")  # 글과 그림을 한 장에
+        self.path = os.path.join(DATA_DIR, "memo.txt")        # 예전 형식(읽기만)
         self.conf_path = os.path.join(DATA_DIR, "memo_qt.json")
         self.font_size = self.FONT_DEFAULT
         self.pinned = True
@@ -819,7 +883,8 @@ class Memo(QWidget):
         line.setFrameShape(QFrame.HLine)
         line.setStyleSheet("color:#DCDCE2;")
         lay.addWidget(line)
-        self.text = QPlainTextEdit()
+        self.text = MemoEdit()
+        self.text.setAcceptDrops(True)
         self.text.setFrameShape(QFrame.NoFrame)
         self.text.setStyleSheet("background:#FFFFFF; padding:8px;")
         self._apply_font()
@@ -870,7 +935,15 @@ class Memo(QWidget):
         self._save_conf()
 
     def _apply_font(self):
-        self.text.setFont(QFont(UI_FONT_NAME, self.font_size))
+        font = QFont(UI_FONT_NAME, self.font_size)
+        self.text.setFont(font)
+        # HTML 로 저장했다 불러오면 글꼴이 본문에 박혀 있어서, 위젯 글꼴만
+        # 바꾸면 이미 쓴 글은 그대로다. 문서 전체에 다시 입힌다(그림은 그대로).
+        doc_cursor = QTextCursor(self.text.document())
+        doc_cursor.select(QTextCursor.Document)
+        fmt = QTextCharFormat()
+        fmt.setFont(font)
+        doc_cursor.mergeCharFormat(fmt)
 
     # ------------------------------------------------------------ 항상 띄워놓기
 
@@ -915,23 +988,52 @@ class Memo(QWidget):
         except Exception:
             pass
 
+    def _register_images(self, html):
+        """본문에 박힌 그림을 문서 자원으로 등록한다.
+
+        setHtml 은 data: 주소를 스스로 풀지 않으므로, 미리 넣어 주지 않으면
+        그림 자리가 빈칸으로 남는다.
+        """
+        import base64
+        import re
+        doc = self.text.document()
+        for uri in set(re.findall('src="(data:image/[^"]+)"', html)):
+            try:
+                img = QImage()
+                img.loadFromData(base64.b64decode(uri.split(",", 1)[1]))
+                if not img.isNull():
+                    doc.addResource(QTextDocument.ImageResource, QUrl(uri), img)
+            except Exception:
+                pass
+
     def _load(self):
         try:
-            if os.path.exists(self.path):
+            if os.path.exists(self.html_path):
+                with open(self.html_path, encoding="utf-8") as f:
+                    html = f.read()
+                self._register_images(html)
+                self.text.setHtml(html)
+                return
+            if os.path.exists(self.path):      # 그림 이전 형식에서 넘어온다
                 with open(self.path, encoding="utf-8") as f:
                     self.text.setPlainText(f.read())
         except Exception:
-            pass
+            log("memo load " + traceback.format_exc())
 
     def _on_changed(self):
         self._save_timer.start()
 
     def save(self):
+        """memo.html 한 장에 글과 그림을 함께 담는다.
+
+        그림을 따로 두면 USB 로 옮길 때 흩어지므로 base64 로 본문에 넣는다.
+        브라우저로 바로 열어 볼 수 있는 형식이기도 하다.
+        """
         try:
-            with open(self.path, "w", encoding="utf-8") as f:
-                f.write(self.text.toPlainText())
+            with open(self.html_path, "w", encoding="utf-8") as f:
+                f.write(self.text.toHtml())
         except Exception:
-            pass
+            log("memo save " + traceback.format_exc())
 
     def closeEvent(self, ev):
         self.save()
