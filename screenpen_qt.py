@@ -37,8 +37,30 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 import winbits as wb
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-wb.set_log_path(os.path.join(BASE_DIR, "screenpen_qt.log"))
+def _data_dir():
+    """메모·설정·로그를 둘 곳.
+
+    USB 에 담아 들고 다니며 쓰므로 실행 파일 옆에 둔다. 그래야 메모가 USB 를
+    따라다닌다. 얼린 exe 에서 __file__ 은 임시 폴더를 가리키므로 쓰면 안 된다.
+    """
+    if getattr(sys, "frozen", False):
+        d = os.path.dirname(sys.executable)
+    else:
+        d = os.path.dirname(os.path.abspath(__file__))
+    if not os.access(d, os.W_OK):          # 읽기 전용 매체면 사용자 폴더로
+        d = os.path.join(os.path.expanduser("~"), "ScreenPen")
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _res_dir():
+    """로고처럼 번들에 함께 들어가는 읽기 전용 자원이 있는 곳."""
+    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+
+
+BASE_DIR = _res_dir()
+DATA_DIR = _data_dir()
+wb.set_log_path(os.path.join(DATA_DIR, "screenpen_qt.log"))
 log = wb.log
 
 wb.set_dpi_aware()
@@ -778,8 +800,8 @@ class Memo(QWidget):
         from PySide6.QtWidgets import (QCheckBox, QPlainTextEdit, QVBoxLayout,
                                        QFrame)
         self.app = app
-        self.path = os.path.join(BASE_DIR, "memo.txt")
-        self.conf_path = os.path.join(BASE_DIR, "memo_qt.json")
+        self.path = os.path.join(DATA_DIR, "memo.txt")
+        self.conf_path = os.path.join(DATA_DIR, "memo_qt.json")
         self.font_size = self.FONT_DEFAULT
         self.pinned = True
         self._load_conf()
@@ -1178,7 +1200,7 @@ class ScreenPenQt:
         time.sleep(0.06)
         img = wb.grab_rect(VX, VY, VW, VH)
         wb.exclude_from_capture(hwnd, True)
-        d = os.path.join(os.path.expanduser("~"), "Pictures", "ScreenPen")
+        d = os.path.join(DATA_DIR, "captures")
         os.makedirs(d, exist_ok=True)
         path = os.path.join(
             d, "screenpen_%s.png"

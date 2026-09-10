@@ -5,3 +5,7 @@ memo.txt
 memo.json
 screenpen_qt.log
 memo_qt.json
+captures/
+build/
+dist/
+*.spec

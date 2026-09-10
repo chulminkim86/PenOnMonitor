@@ -120,7 +120,9 @@ Qt 판은 `pip install PySide6-Essentials` 가 필요하다.
 
 ## 저장
 
-`~/Pictures/ScreenPen/screenpen_YYYYMMDD_HHMMSS.png`에 저장된다. 툴바, 테두리,
+Tk 판은 `~/Pictures/ScreenPen` 에, Qt 판은 **실행 파일 옆 `captures/`** 에
+`screenpen_YYYYMMDD_HHMMSS.png` 로 저장한다. USB 에 담아 쓸 때 캡처가 함께
+따라다니도록 한 것이다. 툴바, 테두리,
 굵기 표시는 빠진다. 통과 모드에서 저장하면 그 순간의 실제 화면 위에
 필기가 얹힌 상태로, 화이트보드에서 저장하면 흰 판과 판서만 캡처된다.
 
@@ -140,3 +142,32 @@ Tk 캔버스는 안티에일리어싱이 없고 CPU 로 그린다. 획이 계단
 
 확대가 뷰 변환 한 번이라 비용이 획 수를 따라가지 않는다. 재생 중인 영상이나
 스크롤 위에 그대로 그릴 수 있는 것도 Qt 판에서만 된다.
+
+## USB 에 담아 쓰기
+
+파이썬이 없는 PC 에서도 쓰려면 단일 실행 파일로 묶는다.
+
+```
+build_exe.bat
+```
+
+PyInstaller 가 필요하다 (`pip install pyinstaller`). 결과물은 Dropbox 밖인
+`%USERPROFILE%\ScreenPen_build\dist\PenOnMonitor.exe` 에 생긴다.
+
+| 방식 | 크기 | 시작 시간(SSD) |
+|---|---|---|
+| 폴더 (216개 파일) | 152 MB | 0.33초 |
+| 단일 exe | 61.8 MB | 2.2초 |
+| **단일 exe, numpy 제외** | **47.6 MB** | **2.0초** |
+
+USB 에는 단일 exe 가 낫다. 시작 시간만 보면 폴더가 빠르지만 그건 내장 디스크
+기준이고, USB 에서는 216개 파일을 매번 읽는 쪽이 더 불리하다. 단일 exe 는
+파일 하나를 순차로 읽고 압축은 로컬 임시 폴더에서 푼다.
+
+쓰지 않는 numpy 가 Pillow 를 통해 27MB 딸려 들어오므로 빼면 62 -> 48MB 가 된다.
+
+메모·설정·로그·캡처는 **실행 파일 옆에** 쌓인다. 그래야 USB 를 따라다닌다.
+얼린 exe 에서 `__file__` 은 임시 폴더를 가리키므로 그대로 쓰면 메모가 실행할
+때마다 날아간다. USB 가 쓰기 금지면 사용자 폴더로 물러난다.
+
+서명이 없으므로 처음 실행할 때 SmartScreen 경고가 뜰 수 있다.
