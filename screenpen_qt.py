@@ -1405,22 +1405,6 @@ class ScreenPenQt:
 
     # ------------------------------------------------------------ 저장
 
-    def save_png(self):
-        """Ctrl+Alt+S 로만 쓴다. 툴바에서는 뺐다."""
-        hwnd = int(self.overlay.winId())
-        wb.exclude_from_capture(hwnd, False)
-        QApplication.processEvents()
-        time.sleep(0.06)
-        img = wb.grab_rect(VX, VY, VW, VH)
-        wb.exclude_from_capture(hwnd, True)
-        d = os.path.join(DATA_DIR, "captures")
-        os.makedirs(d, exist_ok=True)
-        path = os.path.join(
-            d, "screenpen_%s.png"
-            % datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
-        img.save(path)
-        log("saved " + path)
-
     def _glass_tick(self):
         if not self.board_mode and not self.input_mode:
             self.bar.refresh_glass()
@@ -1453,8 +1437,6 @@ class ScreenPenQt:
             1: (wb.MOD_NOREPEAT, wb.VK_F8, "F8",
                 lambda: self.set_input(not self.input_mode)),
             2: (wb.MOD_NOREPEAT, wb.VK_F9, "F9", self.clear_all),
-            3: (wb.MOD_NOREPEAT | wb.MOD_CONTROL | wb.MOD_ALT, wb.VK_S,
-                "Ctrl+Alt+S", self.save_png),
             4: (wb.MOD_NOREPEAT | wb.MOD_CONTROL | wb.MOD_ALT, wb.VK_Q,
                 "Ctrl+Alt+Q", self.quit),
             5: (wb.MOD_NOREPEAT | wb.MOD_CONTROL, wb.VK_0, "Ctrl+0",
