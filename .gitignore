@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 screenpen.log
+memo.txt
+memo.json
+screenpen_qt.log
+memo_qt.json

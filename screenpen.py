@@ -38,6 +38,7 @@ from ctypes import wintypes
 import tkinter as tk
 from tkinter import font as tkfont
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageGrab, ImageTk
+from memo import MemoWindow
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(BASE_DIR, "screenpen.log")
@@ -52,6 +53,7 @@ SRCCOPY = 0x00CC0020
 
 GWL_EXSTYLE = -20
 WS_EX_TRANSPARENT = 0x20
+WS_EX_TOPMOST = 0x8
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
 WM_APP_ESC = 0x8001            # 전용 스레드에 Esc 등록/해제를 요청할 때 쓴다
@@ -188,6 +190,8 @@ TOOLS = [
 ACTIONS = [
     ("board", "화이트보드", "화이트보드  ·  Ctrl+0\n흰 판으로 화면을 덮는다"),
     ("clear", "전체지우기", "전체 지우기  ·  F9"),
+    ("memo", "메모", "메모장 열기/닫기" + chr(10) +
+     "크기 조절 자유 · 항상 띄워놓기 지원"),
     ("save", "저장", "PNG로 저장  ·  Ctrl+Alt+S\n~/Pictures/ScreenPen"),
 ]
 
@@ -338,6 +342,10 @@ class ScreenPen:
         if self.capture_excluded:
             self._exclude(self._hwnd())
             self._exclude(self._hwnd(self.bar))
+
+        # 메모 창이 자기 자리를 잡을 때 화면 크기를 참고한다
+        self.VX, self.VY, self.VW, self.VH = VX, VY, VW, VH
+        self.memo = MemoWindow(self, BASE_DIR)
 
         self._register_hotkeys()
         self._set_click_through(True)
@@ -766,7 +774,11 @@ class ScreenPen:
         if z["kind"] == "tool":
             return z["id"] == self.tool and not self.hand_mode
         if z["kind"] == "action":
-            return z["id"] == "board" and self.board_mode
+            if z["id"] == "board":
+                return self.board_mode
+            if z["id"] == "memo":
+                return self.memo.shown
+            return False
         if z["kind"] == "color":
             return z["id"] == self.color
         return False
@@ -844,7 +856,7 @@ class ScreenPen:
             self.quit()
         elif z["kind"] == "action":
             {"board": self.toggle_board, "clear": self.clear_all,
-             "save": self.save_png}[z["id"]]()
+             "memo": self.memo.toggle, "save": self.save_png}[z["id"]]()
 
     def _bar_move(self, e):
         if self._bar_drag is None:
@@ -858,14 +870,21 @@ class ScreenPen:
             self._render_bar(reblur=True)      # 옮긴 자리의 배경으로 다시 흐린다
 
     def _keep_bar_visible(self):
-        """툴바는 어떤 상태에서도 항상 보이고 맨 앞에 있어야 한다."""
+        """툴바는 어떤 상태에서도 항상 보이고 맨 앞에 있어야 한다.
+
+        예전에는 주기적으로 lift() 를 불렀는데, 메모 창도 같은 일을 하고 있어서
+        둘이 서로를 밀어내며 Z순서가 계속 뒤집혔다. 그때마다 창이 다시 그려져
+        깜빡였다. 그래서 이미 맨 위면 아무것도 하지 않는다.
+        """
         if not self._alive:
             return
         try:
             if not self.bar.winfo_viewable():
                 self.bar.deiconify()
-            self.bar.attributes("-topmost", True)
-            self.bar.lift()
+            hwnd = self._hwnd(self.bar)
+            if not (user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST):
+                self.bar.attributes("-topmost", True)
+                self.bar.lift()
         except Exception:
             self._log_exc("keep_bar")
         self.root.after(1200, self._keep_bar_visible)
@@ -945,6 +964,7 @@ class ScreenPen:
         self.canvas.delete("bg")
         self.canvas.delete("ui")
         self.canvas.delete("hint")
+        self.canvas.delete("ann")   # 필기는 남기고 화면에서만 감춘다
         self.bgimg = None
         self.bg_pil = None
         self._set_click_through(True)
@@ -970,6 +990,7 @@ class ScreenPen:
             self.canvas.tag_lower("bg")
             self._enter_input()
             self._show_ui()
+            self._redraw()          # 지난 필기를 되살린다
         else:
             self._leave_input()
         self._sync_esc()
@@ -1223,6 +1244,10 @@ class ScreenPen:
 
     def _redraw(self):
         self.canvas.delete("ann")
+        # 그리기를 끄면 필기를 감춘다. 지우는 것이 아니라 감추는 것이라,
+        # 다시 켜면 그대로 되살아난다.
+        if not self.drawing_mode:
+            return
         for i, s in enumerate(self.surf.strokes):
             self._draw_stroke(s, i)
 
@@ -1393,6 +1418,7 @@ class ScreenPen:
     def quit(self):
         self._alive = False
         self._tip_hide()
+        self.memo.destroy()
         try:
             self.hk.stop()
         except Exception:
