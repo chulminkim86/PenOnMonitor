@@ -76,6 +76,7 @@ INK_BLUE = "#2569A7"
 INK_RED = "#A20000"
 MARKER_YELLOW = "#FFE24D"
 MARKER_ALPHA = 110              # 진짜 반투명. Tk 에서는 디더링으로 흉내 냈다
+BOARD_BG = "#FAFAF8"            # 화이트보드 바탕. 순백보다 눈이 편하다
 
 COLORS = [INK_BLACK, INK_RED, INK_BLUE]
 COLOR_NAMES = ["검정", "빨강", "파랑"]
@@ -248,7 +249,7 @@ class Overlay(QGraphicsView):
         self.screen_scene = QGraphicsScene(-VW, -VH, VW * 3, VH * 3)
         self.screen_scene.setBackgroundBrush(QBrush(Qt.transparent))
         self.board_scene = QGraphicsScene(-6000, -4000, 18000, 12000)
-        self.board_scene.setBackgroundBrush(QBrush(QColor("#FFFFFF")))
+        self.board_scene.setBackgroundBrush(QBrush(QColor(BOARD_BG)))
         self.setScene(self.screen_scene)
         self.setGeometry(VX, VY, VW, VH)
         self._aligned = False
@@ -302,7 +303,7 @@ class Overlay(QGraphicsView):
         """
         painter.save()
         painter.setCompositionMode(QPainter.CompositionMode_Source)
-        painter.fillRect(rect, QColor("#FFFFFF") if self.app.board_mode
+        painter.fillRect(rect, QColor(BOARD_BG) if self.app.board_mode
                          else Qt.transparent)
         painter.restore()
 
@@ -610,7 +611,7 @@ class GlassBar(QWidget):
         W, H = self.BW, self.BH
         try:
             if self.app.board_mode:
-                src = Image.new("RGB", (W, H), "#FFFFFF")
+                src = Image.new("RGB", (W, H), BOARD_BG)
             else:
                 src = wb.grab_rect(self.x(), self.y(), W, H)
             small = src.resize((max(1, W // 4), max(1, H // 4)), Image.BILINEAR)
@@ -791,6 +792,8 @@ class GlassBar(QWidget):
 
 
 MEMO_IMG_MAX_W = 1400          # 붙여넣은 그림이 이보다 넓으면 줄인다
+RESIZE_EDGE = 10               # 가장자리로 인식하는 폭
+RESIZE_MIN_W = 40.0            # 이보다 작게는 줄이지 않는다
 MEMO_IMG_EXT = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
 
 
@@ -810,11 +813,17 @@ def image_to_data_uri(img):
 
 
 class MemoEdit(QTextEdit):
-    """메모장 + 그림 붙여넣기.
+    """메모장 + 그림 붙여넣기 + 그림 크기 조절.
 
     글은 메모장처럼 서식 없이 들어가고, 그림만 그림으로 들어간다.
     웹에서 복사한 글씨 크기나 색이 딸려 들어오지 않게 하려는 것이다.
+    그림은 가장자리를 잡아 끌면 비율을 지키며 크기가 바뀐다.
     """
+
+    def __init__(self):
+        super().__init__()
+        self.setMouseTracking(True)     # 눌러야만 알 수 있으면 손잡이를 못 찾는다
+        self._resize = None
 
     def insertFromMimeData(self, src):
         img = self._image_of(src)
@@ -851,6 +860,108 @@ class MemoEdit(QTextEdit):
         uri = image_to_data_uri(img)
         self.document().addResource(QTextDocument.ImageResource, QUrl(uri), img)
         self.textCursor().insertImage(uri)
+
+    # -------------------------------------------------------- 그림 크기 조절
+
+    def image_at(self, pos):
+        """pos 아래에 있는 그림과 그 사각형을 찾는다.
+
+        QTextEdit 은 그림 손잡이를 주지 않으므로 직접 짚는다. 커서 위치의 글자와
+        그 앞 글자를 모두 보는 것은, 그림 오른쪽 가장자리에서는 커서가 그림
+        '뒤' 를 가리키기 때문이다.
+        """
+        doc = self.document()
+        base = self.cursorForPosition(pos).position()
+        for shift in (0, -1):
+            at = base + shift
+            if at < 0:
+                continue
+            cur = QTextCursor(doc)
+            cur.setPosition(at)
+            cur.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor)
+            # 글자 하나를 실제로 물었는지 확인해야 한다. 문서 끝에서는 선택이
+            # 비는데, 빈 커서의 charFormat 은 '앞 글자' 서식을 돌려주므로
+            # 그림을 찾은 것으로 착각하고 엉뚱한 자리를 잡게 된다.
+            if not cur.hasSelection():
+                continue
+            fmt = cur.charFormat()
+            if not fmt.isImageFormat():
+                continue
+            ifmt = fmt.toImageFormat()
+            w, h = ifmt.width(), ifmt.height()
+            if w <= 0 or h <= 0:               # 아직 크기를 정한 적이 없으면 원본 크기
+                res = doc.resource(QTextDocument.ImageResource,
+                                   QUrl(ifmt.name()))
+                if not isinstance(res, QImage) or res.isNull():
+                    continue
+                w, h = float(res.width()), float(res.height())
+            head = QTextCursor(doc)
+            head.setPosition(at)
+            r = self.cursorRect(head)
+            return at, ifmt, QRectF(r.left(), r.top(), w, h)
+        return None, None, None
+
+    def _grip(self, ptf, rect):
+        """가장자리를 잡았는지. 오른쪽 / 아래 / 모서리."""
+        if rect is None:
+            return None
+        near = rect.adjusted(-RESIZE_EDGE, -RESIZE_EDGE, RESIZE_EDGE, RESIZE_EDGE)
+        if not near.contains(ptf):
+            return None
+        right = abs(ptf.x() - rect.right()) <= RESIZE_EDGE
+        bottom = abs(ptf.y() - rect.bottom()) <= RESIZE_EDGE
+        if right and bottom:
+            return "corner"
+        if right:
+            return "right"
+        if bottom:
+            return "bottom"
+        return None
+
+    def mouseMoveEvent(self, ev):
+        if self._resize is not None:
+            self.apply_resize(ev.position())
+            return
+        _at, _f, rect = self.image_at(ev.position().toPoint())
+        grip = self._grip(ev.position(), rect)
+        self.viewport().setCursor(
+            Qt.SizeHorCursor if grip == "right" else
+            Qt.SizeVerCursor if grip == "bottom" else
+            Qt.SizeFDiagCursor if grip == "corner" else Qt.IBeamCursor)
+        super().mouseMoveEvent(ev)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            at, ifmt, rect = self.image_at(ev.position().toPoint())
+            grip = self._grip(ev.position(), rect)
+            if grip:
+                self._resize = (at, rect.width(), rect.height(),
+                                ev.position(), grip)
+                return                      # 글자 선택으로 넘기지 않는다
+        super().mousePressEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        if self._resize is not None:
+            self._resize = None
+            self.viewport().setCursor(Qt.IBeamCursor)
+            return
+        super().mouseReleaseEvent(ev)
+
+    def apply_resize(self, ptf):
+        at, w0, h0, start, grip = self._resize
+        if grip == "bottom":
+            scale = (h0 + (ptf.y() - start.y())) / h0
+        else:
+            scale = (w0 + (ptf.x() - start.x())) / w0
+        limit = max(80.0, self.viewport().width() - 24.0)
+        new_w = max(RESIZE_MIN_W, min(w0 * scale, limit))   # 비율은 유지한다
+        cur = QTextCursor(self.document())
+        cur.setPosition(at)
+        cur.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor)
+        ifmt = cur.charFormat().toImageFormat()
+        ifmt.setWidth(new_w)
+        ifmt.setHeight(new_w * h0 / w0)
+        cur.setCharFormat(ifmt)
 
 
 class Memo(QWidget):
