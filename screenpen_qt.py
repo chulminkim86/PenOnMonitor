@@ -107,7 +107,6 @@ ACTIONS = [
     ("board", "화이트보드"),
     ("clear", "전체지우기"),
     ("memo", "메모"),
-    ("save", "저장"),
 ]
 
 WIDTH_MIN, WIDTH_MAX = 1, 50
@@ -587,7 +586,7 @@ class GlassBar(QWidget):
         self.seps.append(x)
         x += SEP_PAD
         tips = {"board": "화이트보드  ·  Ctrl+0", "clear": "전체 지우기  ·  F9",
-                "memo": "메모장 열기/닫기", "save": "PNG 저장  ·  Ctrl+Alt+S"}
+                "memo": "메모장 열기/닫기"}
         for aid, label in ACTIONS:
             x = add("action", aid, x, self.fm.horizontalAdvance(label) + 22,
                     label, tips[aid])
@@ -1389,7 +1388,7 @@ class ScreenPenQt:
             self.quit()
         elif k == "action":
             {"board": self.toggle_board, "clear": self.clear_all,
-             "memo": self.toggle_memo, "save": self.save_png}[i]()
+             "memo": self.toggle_memo}[i]()
 
     def toggle_memo(self):
         if self.memo is not None and self.memo.isVisible():
@@ -1407,6 +1406,7 @@ class ScreenPenQt:
     # ------------------------------------------------------------ 저장
 
     def save_png(self):
+        """Ctrl+Alt+S 로만 쓴다. 툴바에서는 뺐다."""
         hwnd = int(self.overlay.winId())
         wb.exclude_from_capture(hwnd, False)
         QApplication.processEvents()
