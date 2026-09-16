@@ -116,6 +116,8 @@ ZOOM_MIN, ZOOM_MAX = 0.25, 8.0
 ZOOM_NOTCH = 1.18
 ZOOM_EASE = 0.34
 ZOOM_FRAME_MS = 8
+ZOOM_DRAG_PX = 240             # Ctrl+Shift 로 세로 이만큼 끌면 2배
+WIDTH_DRAG_PX = 10             # Ctrl+Shift 로 가로 이만큼 끌면 1pt
 GL_SAMPLES = 4          # 멀티샘플 안티에일리어싱
 
 SWITCH_MS = 190
@@ -258,6 +260,7 @@ class Overlay(QGraphicsView):
         self._pan = None
         self._zoom_target = 1.0
         self._zoom_at = None
+        self._zoomdrag = None
         self._zoom_timer = QTimer(self)
         self._zoom_timer.setInterval(ZOOM_FRAME_MS)
         self._zoom_timer.timeout.connect(self._zoom_step)
@@ -350,6 +353,14 @@ class Overlay(QGraphicsView):
         if not app.input_mode:
             return
         ctrl = bool(ev.modifiers() & Qt.ControlModifier)
+        shift = bool(ev.modifiers() & Qt.ShiftModifier)
+        if (ctrl and shift and app.board_mode
+                and ev.button() == Qt.LeftButton):
+            # Ctrl 단독(화면 이동)보다 먼저 걸러야 한다
+            self._zoom_timer.stop()
+            self._zoomdrag = (ev.position(), ev.position(), app.width)
+            self.setCursor(Qt.SizeVerCursor)
+            return
         if (ev.button() == Qt.MiddleButton or ctrl
                 or (app.hand_mode and app.board_mode)):
             self._pan = ev.position()
@@ -375,6 +386,9 @@ class Overlay(QGraphicsView):
 
     def mouseMoveEvent(self, ev):
         app = self.app
+        if self._zoomdrag is not None:
+            self.ctrl_shift_drag(ev.position())
+            return
         if self._pan is not None:
             d = ev.position() - self._pan
             self._pan = ev.position()
@@ -400,6 +414,13 @@ class Overlay(QGraphicsView):
 
     def mouseReleaseEvent(self, ev):
         app = self.app
+        if self._zoomdrag is not None:
+            self._zoomdrag = None
+            self._zoom_timer.stop()    # 다음 휠 확대가 지금 배율에서 이어지게
+            self._zoom_target = self.transform().m11()
+            self.setCursor(Qt.OpenHandCursor if app.hand_mode
+                           else Qt.CrossCursor)
+            return
         if self._pan is not None:
             self._pan = None
             self.setCursor(Qt.OpenHandCursor if app.hand_mode
@@ -453,6 +474,37 @@ class Overlay(QGraphicsView):
             return
         if app.board_mode:
             self.zoom(ZOOM_NOTCH if up else 1 / ZOOM_NOTCH, ev.position())
+
+    def ctrl_shift_drag(self, ptf):
+        """Ctrl+Shift 로 끌어서 세로는 확대/축소, 가로는 굵기.
+
+        아래로 끌면 확대, 위로 끌면 축소. 오른쪽으로 끌면 굵어지고 왼쪽이면
+        가늘어진다. 한 번 누른 채로 둘 다 조절할 수 있다.
+
+        확대는 처음 누른 자리를 고정해 두어야 보고 있던 곳이 달아나지 않는다.
+        굵기는 누른 순간의 값을 기준으로 절대 거리로 센다. 그래야 왔다 갔다
+        끌어도 값이 밀리지 않는다. 끄는 동안에는 손에 붙어야 하므로 휠처럼
+        부드럽게 따라가지 않고 곧바로 반영한다.
+        """
+        start, last, w0 = self._zoomdrag
+        dy = ptf.y() - last.y()
+        self._zoomdrag = (start, ptf, w0)
+
+        steps = int(round((ptf.x() - start.x()) / WIDTH_DRAG_PX))
+        want_w = max(WIDTH_MIN, min(WIDTH_MAX, w0 + steps))
+        if want_w != self.app.width:
+            self.app.set_width(want_w)
+            self.app.show_width_hint()
+
+        if abs(dy) < 0.5:
+            return
+        cur = self.transform().m11()
+        want = cur * (2.0 ** (dy / ZOOM_DRAG_PX))
+        want = min(ZOOM_MAX, max(ZOOM_MIN, want))
+        if abs(want - cur) < 1e-9:
+            return
+        self._zoom_at = start
+        self._apply_zoom(want / cur)
 
     def zoom(self, factor, at=None):
         if not self.app.board_mode:
@@ -1209,7 +1261,7 @@ class ScreenPenQt:
         if not self.input_mode:
             return
         self.set_width(self.width + step)
-        self._show_width_hint()
+        self.show_width_hint()
 
     def _clear_hint(self):
         for it in self.hint_items:
@@ -1219,7 +1271,7 @@ class ScreenPenQt:
                 pass
         self.hint_items = []
 
-    def _show_width_hint(self):
+    def show_width_hint(self):
         from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsSimpleTextItem
         self._clear_hint()
         sc = self.overlay.scene()
