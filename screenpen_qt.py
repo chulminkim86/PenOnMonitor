@@ -118,6 +118,7 @@ ZOOM_EASE = 0.34
 ZOOM_FRAME_MS = 8
 ZOOM_DRAG_PX = 240             # Ctrl+Shift 로 세로 이만큼 끌면 2배
 WIDTH_DRAG_PX = 10             # Ctrl+Shift 로 가로 이만큼 끌면 1pt
+AXIS_LOCK_PX = 12              # 이만큼 끌면 세로/가로 중 한쪽으로 잠근다
 GL_SAMPLES = 4          # 멀티샘플 안티에일리어싱
 
 SWITCH_MS = 190
@@ -358,8 +359,9 @@ class Overlay(QGraphicsView):
                 and ev.button() == Qt.LeftButton):
             # Ctrl 단독(화면 이동)보다 먼저 걸러야 한다
             self._zoom_timer.stop()
-            self._zoomdrag = (ev.position(), ev.position(), app.width)
-            self.setCursor(Qt.SizeVerCursor)
+            self._zoomdrag = [ev.position(), ev.position(),
+                              app.width, None]
+            self.setCursor(Qt.SizeAllCursor)
             return
         if (ev.button() == Qt.MiddleButton or ctrl
                 or (app.hand_mode and app.board_mode)):
@@ -479,23 +481,45 @@ class Overlay(QGraphicsView):
         """Ctrl+Shift 로 끌어서 세로는 확대/축소, 가로는 굵기.
 
         아래로 끌면 확대, 위로 끌면 축소. 오른쪽으로 끌면 굵어지고 왼쪽이면
-        가늘어진다. 한 번 누른 채로 둘 다 조절할 수 있다.
+        가늘어진다.
+
+        **한 번 끄는 동안에는 둘 중 하나만 바뀐다.** 손으로 긋는 선은 곧지
+        않아서 두 축을 동시에 반영하면 세로로 끌 때 가로 성분 몇 px 이 굵기로
+        새어 나간다. 그래서 AXIS_LOCK_PX 만큼 끌린 순간 더 많이 움직인 쪽으로
+        축을 정하고, 손을 뗄 때까지 나머지 축은 무시한다. 다른 쪽을 조절하려면
+        버튼만 놓았다 다시 누르면 된다 (Ctrl+Shift 는 계속 쥔 채로).
+
+        잠힐 때까지의 12px 는 따로 빼지 않는다. 그걸 빼면 누른 자리로 되돌아와도
+        원래 값으로 돌아오지 않고 1pt 씩 밀린다. 대신 잠기는 순간 굵기가 1pt
+        건너뛰는데, 이쪽이 눈에 띄지 않는다.
 
         확대는 처음 누른 자리를 고정해 두어야 보고 있던 곳이 달아나지 않는다.
         굵기는 누른 순간의 값을 기준으로 절대 거리로 센다. 그래야 왔다 갔다
         끌어도 값이 밀리지 않는다. 끄는 동안에는 손에 붙어야 하므로 휠처럼
         부드럽게 따라가지 않고 곧바로 반영한다.
         """
-        start, last, w0 = self._zoomdrag
+        anchor, last, w0, axis = self._zoomdrag
+
+        if axis is None:
+            dx, dy = ptf.x() - anchor.x(), ptf.y() - anchor.y()
+            if max(abs(dx), abs(dy)) < AXIS_LOCK_PX:
+                return                      # 아직 어느 쪽인지 모른다
+            axis = "zoom" if abs(dy) > abs(dx) else "width"
+            self._zoomdrag[3] = axis
+            self.setCursor(Qt.SizeVerCursor if axis == "zoom"
+                           else Qt.SizeHorCursor)
+
+        if axis == "width":
+            self._zoomdrag[1] = ptf
+            steps = int(round((ptf.x() - anchor.x()) / WIDTH_DRAG_PX))
+            want_w = max(WIDTH_MIN, min(WIDTH_MAX, w0 + steps))
+            if want_w != self.app.width:
+                self.app.set_width(want_w)
+                self.app.show_width_hint()
+            return
+
         dy = ptf.y() - last.y()
-        self._zoomdrag = (start, ptf, w0)
-
-        steps = int(round((ptf.x() - start.x()) / WIDTH_DRAG_PX))
-        want_w = max(WIDTH_MIN, min(WIDTH_MAX, w0 + steps))
-        if want_w != self.app.width:
-            self.app.set_width(want_w)
-            self.app.show_width_hint()
-
+        self._zoomdrag[1] = ptf
         if abs(dy) < 0.5:
             return
         cur = self.transform().m11()
@@ -503,7 +527,7 @@ class Overlay(QGraphicsView):
         want = min(ZOOM_MAX, max(ZOOM_MIN, want))
         if abs(want - cur) < 1e-9:
             return
-        self._zoom_at = start
+        self._zoom_at = anchor
         self._apply_zoom(want / cur)
 
     def zoom(self, factor, at=None):
