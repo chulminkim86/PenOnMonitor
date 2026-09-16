@@ -698,7 +698,13 @@ class GlassBar(QWidget):
 
         DPI 만 따라가면 1366px 같은 좁은 화면에서 툴바가 화면의 60% 를 덮는다.
         BW 는 배율에 거의 비례하므로 한두 번이면 수렴한다.
+
+        배율을 재보려면 실제로 한 번 배치해 봐야 하는데, 그 흔적을 남기면
+        안 된다. 남기면 '재보기' 가 곧 '적용' 이 되어, 창 크기는 그대로인 채
+        내용만 새 배율로 다시 그려진다(유리판은 넓은데 글자는 왼쪽에만 몰린
+        모습이 그것이다). 다 재고 나면 원래 배율로 되돌려 놓는다.
         """
+        keep = self.ui
         ui = ui_scale_for(screen)
         cap = (screen.availableGeometry().width() * BAR_MAX_FRAC
                if screen is not None else 1e9)
@@ -707,6 +713,8 @@ class GlassBar(QWidget):
             if self.BW <= cap or ui <= UI_MIN:
                 break
             ui = max(UI_MIN, ui * cap / self.BW)
+        if keep != ui:
+            self._measure(keep)        # 재보기였을 뿐이다
         return ui
 
     def _measure(self, ui):
@@ -724,10 +732,17 @@ class GlassBar(QWidget):
         self.logo = load_logo(self.s(22))
         self._layout()
 
+    def own_screen(self):
+        """툴바가 놓인 모니터."""
+        return screen_at(self.x() + self.BW // 2, self.y() + self.BH // 2)
+
     def _relayout(self, screen):
-        """그 모니터에 맞춰 툴바를 다시 짠다. 배율이 그대로면 아무것도 안 한다."""
-        ui = self._fit_scale(screen)
-        self._measure(ui)
+        """그 모니터에 맞춰 툴바를 다시 짠다.
+
+        배치와 창 크기는 반드시 같이 간다. 둘 중 하나만 바꾸면 화면에서
+        바로 티가 난다.
+        """
+        self._measure(self._fit_scale(screen))
         self.logo_pix = pil_to_qpixmap(self.logo) if self.logo else None
         self.setFixedSize(self.BW, self.BH)
         self.glass = None
@@ -735,20 +750,32 @@ class GlassBar(QWidget):
 
     def rescale(self):
         """모니터가 바뀌었거나 해상도가 바뀐 뒤 부르면 크기를 다시 맞춘다."""
-        want = self._fit_scale(screen_at(self.x() + self.BW // 2,
-                                         self.y() + self.BH // 2))
-        if abs(want - self.ui) < 0.01:
-            self._measure(self.ui)      # BW/BH 를 원래 값으로 되돌린다
+        before = (self.ui, self.BW, self.BH)
+        self._relayout(self.own_screen())
+        if (self.ui, self.BW, self.BH) == before:
             return False
-        self._relayout(screen_at(self.x() + self.BW // 2,
-                                 self.y() + self.BH // 2))
         self.snap_into_screen()
         return True
 
+    def fix_size(self):
+        """창 크기가 배치와 어긋나 있으면 맞춘다.
+
+        어긋나면 유리 배경만 넓고 내용은 왼쪽에 몰린 모습이 된다. 눈에 바로
+        띄는 고장이라, 주기적으로 한 번씩 확인해 스스로 고치게 해 둔다.
+        """
+        if (self.width(), self.height()) != (self.BW, self.BH):
+            log("툴바 크기 어긋남: 창 %dx%d, 배치 %dx%d"
+                % (self.width(), self.height(), self.BW, self.BH))
+            self.setFixedSize(self.BW, self.BH)
+            self.glass = None
+            self.update()
+            return True
+        return False
+
     def snap_into_screen(self):
         """화면 밖에 남았으면 끌어온다. 해상도를 낮추면 이렇게 될 수 있다."""
-        sc = screen_at(self.x() + self.BW // 2, self.y() + self.BH // 2)
-        x, y = clamp_to_screen(self.x(), self.y(), self.BW, self.BH, sc)
+        x, y = clamp_to_screen(self.x(), self.y(), self.BW, self.BH,
+                               self.own_screen())
         if (x, y) != (self.x(), self.y()):
             self.move(x, y)
 
@@ -1258,13 +1285,25 @@ class Memo(QWidget):
         self.move(x, y)
 
     def snap_into_screen(self):
-        """화면 밖에 남았으면 끌어온다."""
-        sc = screen_at(self.x() + self.width() // 2,
-                       self.y() + self.height() // 2)
-        x, y = clamp_to_screen(self.x(), self.y(),
-                               self.frameGeometry().width(),
-                               self.frameGeometry().height(), sc)
-        if (x, y) != (self.x(), self.y()):
+        """화면 밖에 남았으면 끌어온다. 화면보다 커졌으면 줄인다.
+
+        move() 는 '틀' 을 옮기지만 x()/y() 는 제목 표시줄을 뺀 안쪽을 돌려준다.
+        섞어 쓰면 테두리 두께만큼 어긋나므로 둘 다 틀 기준으로 잰다.
+        """
+        fg = self.frameGeometry()
+        sc = screen_at(fg.center().x(), fg.center().y())
+        if sc is not None:
+            a = sc.availableGeometry()
+            dw = fg.width() - a.width()
+            dh = fg.height() - a.height()
+            if dw > 0 or dh > 0:       # 해상도가 낮아져 화면보다 커졌다
+                self.resize(max(self.minimumWidth(),
+                                self.width() - max(0, dw)),
+                            max(self.minimumHeight(),
+                                self.height() - max(0, dh)))
+                fg = self.frameGeometry()
+        x, y = clamp_to_screen(fg.x(), fg.y(), fg.width(), fg.height(), sc)
+        if (x, y) != (fg.x(), fg.y()):
             self.move(x, y)
 
     def nativeEvent(self, etype, msg):
@@ -1789,6 +1828,7 @@ class ScreenPenQt:
         try:
             if not self.bar.isVisible():
                 self.bar.show()
+            self.bar.fix_size()
             bar_h = int(self.bar.winId())
             if self.overlay.isVisible():
                 ov_h = int(self.overlay.winId())
