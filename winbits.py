@@ -39,7 +39,8 @@ ESC_ID = 6
 MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x1, 0x2, 0x4000
 ERROR_ALREADY_EXISTS = 183
 
-VK_F8, VK_F9, VK_S, VK_Q, VK_0, VK_ESC = 0x77, 0x78, 0x53, 0x51, 0x30, 0x1B
+VK_F7, VK_F8, VK_F9, VK_S, VK_Q, VK_0, VK_ESC = (
+    0x76, 0x77, 0x78, 0x53, 0x51, 0x30, 0x1B)
 
 user32.GetMessageW.restype = ctypes.c_int
 

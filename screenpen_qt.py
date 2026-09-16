@@ -817,7 +817,7 @@ class GlassBar(QWidget):
         x += SEP - GAP
         self.seps.append(x)
         x += SEP
-        tips = {"board": "화이트보드  ·  Ctrl+0", "clear": "전체 지우기  ·  F9",
+        tips = {"board": "화이트보드  ·  F7", "clear": "전체 지우기  ·  F9",
                 "memo": "메모장 열기/닫기"}
         for aid, label in ACTIONS:
             x = add("action", aid, x, self.fm.horizontalAdvance(label) + PAD,
@@ -1664,7 +1664,7 @@ class ScreenPenQt:
 
     def set_board(self, on, restore=True):
         """restore=True 면 화이트보드에서 나올 때 들어가기 전 그리기 상태로 돌아간다.
-        화이트보드 버튼과 Ctrl+0 이 이 경로다."""
+        화이트보드 버튼과 F7 이 이 경로다."""
         if on == self.board_mode:
             return
         self.overlay._zoom_timer.stop()
@@ -1848,8 +1848,7 @@ class ScreenPenQt:
             2: (wb.MOD_NOREPEAT, wb.VK_F9, "F9", self.clear_all),
             4: (wb.MOD_NOREPEAT | wb.MOD_CONTROL | wb.MOD_ALT, wb.VK_Q,
                 "Ctrl+Alt+Q", self.quit),
-            5: (wb.MOD_NOREPEAT | wb.MOD_CONTROL, wb.VK_0, "Ctrl+0",
-                self.toggle_board),
+            5: (wb.MOD_NOREPEAT, wb.VK_F7, "F7", self.toggle_board),
             wb.ESC_ID: (wb.MOD_NOREPEAT, wb.VK_ESC, "Esc", self.reset_all),
         }
         specs = dict((h, v[:3]) for h, v in self.hotkeys.items()
