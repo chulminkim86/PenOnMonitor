@@ -199,6 +199,31 @@ def round_corners(hwnd):
         return False
 
 
+# ---------------------------------------------------------------- 창 이동 제한
+
+WM_MOVING = 0x0216
+
+
+def moving_rect(msg_addr):
+    """WM_MOVING 이면 창이 놓일 사각형을 돌려준다. 아니면 None.
+
+    제목 표시줄로 끄는 창은 Qt 가 아니라 Windows 가 옮기므로 moveEvent 로는
+    막을 수 없다. Windows 는 놓을 자리를 정하기 전에 WM_MOVING 을 보내 주는데,
+    lParam 이 가리키는 RECT 를 그 자리에서 고치면 그대로 반영된다. 즉 창이
+    화면 밖으로 나가려는 순간에 되돌리는 게 아니라, 아예 나가지 못하게 된다.
+
+    돌려주는 것은 살아 있는 RECT 라 필드를 직접 바꿔 쓰면 된다.
+    """
+    try:
+        msg = ctypes.cast(int(msg_addr), ctypes.POINTER(wintypes.MSG)).contents
+        if msg.message != WM_MOVING:
+            return None
+        return ctypes.cast(msg.lParam,
+                           ctypes.POINTER(wintypes.RECT)).contents
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------- 전역 단축키
 
 class HotkeyThread(threading.Thread):

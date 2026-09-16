@@ -27,10 +27,12 @@ import traceback
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
-from PySide6.QtCore import QBuffer, QByteArray, QPointF, QRectF, Qt, QTimer, QUrl
-from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QImage, QPainter,
-                           QTextCharFormat, QTextCursor, QTextDocument,
-                           QPainterPath, QPen, QPixmap, QSurfaceFormat)
+from PySide6.QtCore import (QBuffer, QByteArray, QPoint, QPointF, QRectF, Qt,
+                            QTimer, QUrl)
+from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetrics,
+                           QGuiApplication, QImage, QPainter, QTextCharFormat,
+                           QTextCursor, QTextDocument, QPainterPath, QPen,
+                           QPixmap, QSurfaceFormat)
 from PySide6.QtWidgets import (QApplication, QGraphicsPathItem,
                                QGraphicsRectItem, QGraphicsScene, QGraphicsView,
                                QTextEdit, QWidget)
@@ -127,6 +129,61 @@ SEP_PAD = 7
 
 UI_FONT_NAME = "맑은 고딕"
 UI_FONT_SIZE = 10
+# 아래 치수들은 모두 192DPI(배율 200%) 화면에 맞춰 잡혀 있다. 그 화면에서
+# ui = 1.0 이 되도록 기준을 거기에 두면, 지금 보고 있는 툴바가 한 픽셀도
+# 달라지지 않은 채로 다른 화면에서만 비례해 줄어든다.
+UI_FONT_PX = 27                # 기준 화면에서의 글자 높이
+UI_REF_DPI = 192.0
+UI_MIN, UI_MAX = 0.40, 2.0     # 0.5 가 96DPI. 그 아래는 좁은 화면용 여유다.
+BAR_MAX_FRAC = 0.40            # 툴바가 모니터 폭에서 차지할 최대 비율
+UI_SCALE = 1.0                 # 툴바가 정한 현재 배율. 위젯 밖에서도 쓴다.
+
+
+# ------------------------------------------------------------------ 화면·배율
+
+def screen_at(x, y):
+    """그 점이 놓인 모니터. 어디에도 없으면 주 모니터."""
+    return (QGuiApplication.screenAt(QPoint(int(x), int(y)))
+            or QGuiApplication.primaryScreen())
+
+
+def cursor_screen():
+    """마우스 커서가 있는 모니터."""
+    p = QCursor.pos()
+    return QGuiApplication.screenAt(p) or QGuiApplication.primaryScreen()
+
+
+def ui_scale_for(screen):
+    """화면 배율.
+
+    Qt 의 HiDPI 배율을 꺼 놨으므로(오버레이 좌표를 Win32 물리 픽셀과 1:1 로
+    맞추려고 그렇게 했다) 창 치수는 우리가 직접 키워야 한다. 그냥 두면 글자만
+    DPI 를 따라 커지고 여백·버튼은 물리 픽셀 그대로라서, 낮은 DPI 화면에서
+    툴바가 '작은 글자가 박힌 커다란 띠' 가 된다.
+
+    Windows 의 '텍스트 크기' 설정을 그대로 따른다. 지금 디자인이 잡혀 있는
+    192DPI 화면이 1.0 이고, 흔한 96DPI 화면은 0.5 가 된다.
+    """
+    if screen is None:
+        return 1.0
+    return max(UI_MIN, min(UI_MAX,
+                           screen.logicalDotsPerInch() / UI_REF_DPI))
+
+
+def clamp_to_screen(x, y, w, h, screen):
+    """창이 그 모니터 안에 온전히 들어오도록 왼쪽 위 좌표를 조정한다.
+
+    작업 표시줄에 깔리지 않게 availableGeometry 를 쓴다. 창이 모니터보다 크면
+    가둘 수가 없으므로 왼쪽 위에 붙인다.
+    """
+    if screen is None:
+        return int(x), int(y)
+    a = screen.availableGeometry()
+    x = (max(a.x(), min(int(x), a.x() + a.width() - w)) if w <= a.width()
+         else a.x())
+    y = (max(a.y(), min(int(y), a.y() + a.height() - h)) if h <= a.height()
+         else a.y())
+    return int(x), int(y)
 
 
 def qcolor(name, alpha=255):
@@ -606,15 +663,15 @@ class GlassBar(QWidget):
                             Qt.Tool)
         self.setMouseTracking(True)
 
-        self.font_reg = QFont(UI_FONT_NAME, UI_FONT_SIZE)
-        self.font_bold = QFont(UI_FONT_NAME, UI_FONT_SIZE, QFont.Bold)
-        self.fm = QFontMetrics(self.font_bold)
-        self.logo = load_logo()
-        self.logo_pix = pil_to_qpixmap(self.logo) if self.logo else None
+        self.ui = 1.0
+        self.logo = None
+        self.logo_pix = None
+        self._relayout(cursor_screen())
 
-        self._layout()
-        self.setFixedSize(self.BW, self.BH)
-        self.move(VX + (VW - self.BW) // 2, VY + 14)
+        a = cursor_screen().availableGeometry()
+        # 가상 데스크톱 한가운데에 놓으면 모니터가 두 대일 때 경계에 반씩
+        # 걸친다. 커서가 있는 모니터 한 대를 기준으로 잡는다.
+        self.move(a.x() + (a.width() - self.BW) // 2, a.y() + self.s(14))
 
         self.glass = None
         self.hover = None
@@ -627,16 +684,87 @@ class GlassBar(QWidget):
         self._sw_timer.setInterval(8)
         self._sw_timer.timeout.connect(self._sw_step)
 
+    # ------------------------------------------------------------ 배율
+
+    def s(self, n):
+        """화면 배율을 곱한 물리 픽셀."""
+        return int(round(n * self.ui))
+
+    def sf(self, n):
+        return n * self.ui
+
+    def _fit_scale(self, screen):
+        """화면 배율을 따르되, 툴바가 모니터 폭을 너무 먹으면 줄인다.
+
+        DPI 만 따라가면 1366px 같은 좁은 화면에서 툴바가 화면의 60% 를 덮는다.
+        BW 는 배율에 거의 비례하므로 한두 번이면 수렴한다.
+        """
+        ui = ui_scale_for(screen)
+        cap = (screen.availableGeometry().width() * BAR_MAX_FRAC
+               if screen is not None else 1e9)
+        for _ in range(6):
+            self._measure(ui)
+            if self.BW <= cap or ui <= UI_MIN:
+                break
+            ui = max(UI_MIN, ui * cap / self.BW)
+        return ui
+
+    def _measure(self, ui):
+        """그 배율로 글꼴과 치수를 잡아 본다. BW/BH 가 정해진다."""
+        global UI_SCALE
+        self.ui = UI_SCALE = ui
+        px = max(10, self.s(UI_FONT_PX))
+        self.font_reg = QFont(UI_FONT_NAME)
+        self.font_reg.setPixelSize(px)
+        # pt 로 두면 Qt 가 DPI 로 한 번 더 키워 배율이 이중으로 적용된다.
+        self.font_bold = QFont(UI_FONT_NAME)
+        self.font_bold.setPixelSize(px)
+        self.font_bold.setBold(True)
+        self.fm = QFontMetrics(self.font_bold)
+        self.logo = load_logo(self.s(22))
+        self._layout()
+
+    def _relayout(self, screen):
+        """그 모니터에 맞춰 툴바를 다시 짠다. 배율이 그대로면 아무것도 안 한다."""
+        ui = self._fit_scale(screen)
+        self._measure(ui)
+        self.logo_pix = pil_to_qpixmap(self.logo) if self.logo else None
+        self.setFixedSize(self.BW, self.BH)
+        self.glass = None
+        self.update()
+
+    def rescale(self):
+        """모니터가 바뀌었거나 해상도가 바뀐 뒤 부르면 크기를 다시 맞춘다."""
+        want = self._fit_scale(screen_at(self.x() + self.BW // 2,
+                                         self.y() + self.BH // 2))
+        if abs(want - self.ui) < 0.01:
+            self._measure(self.ui)      # BW/BH 를 원래 값으로 되돌린다
+            return False
+        self._relayout(screen_at(self.x() + self.BW // 2,
+                                 self.y() + self.BH // 2))
+        self.snap_into_screen()
+        return True
+
+    def snap_into_screen(self):
+        """화면 밖에 남았으면 끌어온다. 해상도를 낮추면 이렇게 될 수 있다."""
+        sc = screen_at(self.x() + self.BW // 2, self.y() + self.BH // 2)
+        x, y = clamp_to_screen(self.x(), self.y(), self.BW, self.BH, sc)
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
+
     # ------------------------------------------------------------ 배치
 
     def _layout(self):
-        GAP, H = 4, 52
+        GAP, H = self.s(4), self.s(52)
         self.BH = H
-        y0, y1 = 9, H - 9
+        y0, y1 = self.s(9), H - self.s(9)
         self.zones = []
-        lw = self.logo.width if self.logo else 22
-        lh = self.logo.height if self.logo else 22
-        LOGO_GAP = 19
+        lw = self.logo.width if self.logo else self.s(22)
+        lh = self.logo.height if self.logo else self.s(22)
+        LOGO_GAP = self.s(19)
+        PAD = self.s(22)                   # 글자 좌우 여백
+        SEP = self.s(SEP_PAD)
+        SW_W, SW_H = self.s(44), self.s(24)
         self.logo_pos = (LOGO_GAP, (H - lh) // 2)
         sep_x = LOGO_GAP + lw + LOGO_GAP
         self.seps = [sep_x]
@@ -647,38 +775,39 @@ class GlassBar(QWidget):
             return x + w + GAP
 
         add("logo", "logo", LOGO_GAP, lw)
-        x = sep_x + SEP_PAD + SEP_PAD
+        x = sep_x + SEP + SEP
 
         for tid, label, key in TOOLS:
             tip = "%s  ·  %s" % (label, key)
-            x = add("tool", tid, x, self.fm.horizontalAdvance(label) + 22,
+            x = add("tool", tid, x, self.fm.horizontalAdvance(label) + PAD,
                     label, tip)
-        x += SEP_PAD - GAP
+        x += SEP - GAP
         self.seps.append(x)
-        x += SEP_PAD
+        x += SEP
         for i, (c, cname) in enumerate(zip(COLORS, COLOR_NAMES), start=1):
-            x = add("color", c, x, 30, None, "%s  ·  Alt+%d" % (cname, i))
-        x += SEP_PAD - GAP
+            x = add("color", c, x, self.s(30), None,
+                    "%s  ·  Alt+%d" % (cname, i))
+        x += SEP - GAP
         self.seps.append(x)
-        x += SEP_PAD
+        x += SEP
         tips = {"board": "화이트보드  ·  Ctrl+0", "clear": "전체 지우기  ·  F9",
                 "memo": "메모장 열기/닫기"}
         for aid, label in ACTIONS:
-            x = add("action", aid, x, self.fm.horizontalAdvance(label) + 22,
+            x = add("action", aid, x, self.fm.horizontalAdvance(label) + PAD,
                     label, tips[aid])
-        x += SEP_PAD - GAP
+        x += SEP - GAP
         self.seps.append(x)
-        x += SEP_PAD
+        x += SEP
         x = add("switch", "switch", x,
-                self.fm.horizontalAdvance("그리기") + 12, "그리기",
+                self.fm.horizontalAdvance("그리기") + self.s(12), "그리기",
                 "그리기 모드  ·  F8")
-        self.switch_rect = (x, (H - 24) // 2, 44, 24)
+        self.switch_rect = (x, (H - SW_H) // 2, SW_W, SW_H)
         self.zones.append({"kind": "switch", "id": "switch", "label": None,
                            "tip": "그리기 모드  ·  F8",
-                           "rect": (x, y0, x + 44, y1)})
-        x += 44 + SEP_PAD
-        x = add("close", "close", x, 30, "✕", "종료  ·  Ctrl+Alt+Q")
-        self.BW = x - GAP + 14
+                           "rect": (x, y0, x + SW_W, y1)})
+        x += SW_W + SEP
+        x = add("close", "close", x, self.s(30), "✕", "종료  ·  Ctrl+Alt+Q")
+        self.BW = x - GAP + self.s(14)
 
     # ------------------------------------------------------------ 유리 배경
 
@@ -690,7 +819,8 @@ class GlassBar(QWidget):
             else:
                 src = wb.grab_rect(self.x(), self.y(), W, H)
             small = src.resize((max(1, W // 4), max(1, H // 4)), Image.BILINEAR)
-            small = small.filter(ImageFilter.GaussianBlur(GLASS_BLUR / 4.0))
+            small = small.filter(
+                ImageFilter.GaussianBlur(self.sf(GLASS_BLUR) / 4.0))
             blurred = small.resize((W, H), Image.BILINEAR)
             glass = Image.blend(blurred, Image.new("RGB", (W, H), GLASS_TINT),
                                 GLASS_TINT_A)
@@ -732,11 +862,12 @@ class GlassBar(QWidget):
             else:
                 continue
             p.setPen(Qt.NoPen)
-            p.drawRoundedRect(QRectF(x0, y0, x1 - x0, y1 - y0), 9, 9)
+            p.drawRoundedRect(QRectF(x0, y0, x1 - x0, y1 - y0),
+                              self.sf(9), self.sf(9))
 
         p.setPen(QPen(QColor(*GLASS_SEP), 1))
         for sx in self.seps:
-            p.drawLine(sx, 15, sx, self.BH - 15)
+            p.drawLine(sx, self.s(15), sx, self.BH - self.s(15))
 
         for z in self.zones:
             if z["kind"] != "color":
@@ -744,11 +875,12 @@ class GlassBar(QWidget):
             x0, y0, x1, y1 = z["rect"]
             cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
             sel = self.app.color == z["id"]
-            r = 9.5 if sel else 8
+            r = self.sf(9.5 if sel else 8)
             if sel:
+                ring = self.sf(2.5)
                 p.setPen(Qt.NoPen)
                 p.setBrush(QBrush(QColor(255, 255, 255, 235)))
-                p.drawEllipse(QPointF(cx, cy), r + 2.5, r + 2.5)
+                p.drawEllipse(QPointF(cx, cy), r + ring, r + ring)
             col = QColor(z["id"])
             if not self.app.enabled(z):
                 col.setAlpha(70)
@@ -784,7 +916,8 @@ class GlassBar(QWidget):
         p.setBrush(QBrush(QColor(INK_BLUE) if self.sw_on
                           else QColor(SWITCH_OFF)))
         p.drawRoundedRect(QRectF(sx, sy, sw, sh), sh / 2.0, sh / 2.0)
-        pad, d = 3, sh - 6
+        pad = self.s(3)
+        d = sh - pad * 2
         kx = sx + pad + (sw - pad * 2 - d) * self.sw_pos
         p.setBrush(QBrush(QColor("#FFFFFF")))
         p.setPen(QPen(QColor("#A9A9B4"), 1))
@@ -792,14 +925,14 @@ class GlassBar(QWidget):
 
         # 유리 테두리
         p.setBrush(Qt.NoBrush)
+        rad = self.sf(GLASS_RADIUS)
         p.setPen(QPen(QColor(*GLASS_EDGE), 1))
-        p.drawRoundedRect(QRectF(0.5, 0.5, self.BW - 1, self.BH - 1),
-                          GLASS_RADIUS, GLASS_RADIUS)
+        p.drawRoundedRect(QRectF(0.5, 0.5, self.BW - 1, self.BH - 1), rad, rad)
         p.setPen(QPen(QColor(*GLASS_RIM), 1))
         p.drawRoundedRect(QRectF(1.5, 1.5, self.BW - 3, self.BH - 3),
-                          GLASS_RADIUS - 1, GLASS_RADIUS - 1)
+                          rad - 1, rad - 1)
         p.setPen(QPen(QColor(*GLASS_RIM_TOP), 1))
-        p.drawLine(GLASS_RADIUS, 1, self.BW - GLASS_RADIUS, 1)
+        p.drawLine(int(rad), 1, self.BW - int(rad), 1)
         p.end()
 
     # ------------------------------------------------------------ 스위치 애니메이션
@@ -837,7 +970,14 @@ class GlassBar(QWidget):
     def mouseMoveEvent(self, ev):
         if self._drag is not None:
             g = ev.globalPosition().toPoint()
-            self.move(g.x() - self._drag[0], g.y() - self._drag[1])
+            # 커서가 있는 모니터 안에 가둔다. 툴바가 있는 모니터로 가두면
+            # 옆 모니터로 옮길 길이 막히는데, 커서는 항상 한 모니터에만
+            # 있으므로 이렇게 하면 한 대일 땐 갇히고 두 대일 땐 따라온다.
+            sc = QGuiApplication.screenAt(g) or self.screen()
+            x, y = clamp_to_screen(g.x() - self._drag[0],
+                                   g.y() - self._drag[1],
+                                   self.BW, self.BH, sc)
+            self.move(x, y)
             return
         z = self._zone_at(ev.position().x(), ev.position().y())
         zid = z["id"] if z else None
@@ -980,11 +1120,12 @@ class MemoEdit(QTextEdit):
         """가장자리를 잡았는지. 오른쪽 / 아래 / 모서리."""
         if rect is None:
             return None
-        near = rect.adjusted(-RESIZE_EDGE, -RESIZE_EDGE, RESIZE_EDGE, RESIZE_EDGE)
+        edge = RESIZE_EDGE * UI_SCALE
+        near = rect.adjusted(-edge, -edge, edge, edge)
         if not near.contains(ptf):
             return None
-        right = abs(ptf.x() - rect.right()) <= RESIZE_EDGE
-        bottom = abs(ptf.y() - rect.bottom()) <= RESIZE_EDGE
+        right = abs(ptf.x() - rect.right()) <= edge
+        bottom = abs(ptf.y() - rect.bottom()) <= edge
         if right and bottom:
             return "corner"
         if right:
@@ -1042,7 +1183,7 @@ class MemoEdit(QTextEdit):
 class Memo(QWidget):
     """메모장. Tk 판과 같은 규칙으로 동작한다."""
 
-    MIN_W, MIN_H = 260, 180
+    MIN_W, MIN_H = 260, 180            # 배율 1.0 기준. ui 를 곱해 쓴다.
     FONT_MIN, FONT_MAX, FONT_DEFAULT = 8, 96, 11
 
     def __init__(self, app):
@@ -1054,6 +1195,7 @@ class Memo(QWidget):
         self.conf_path = os.path.join(DATA_DIR, "memo_qt.json")
         self.font_size = self.FONT_DEFAULT
         self.pinned = True
+        self.ui = app.bar.ui               # 툴바와 같은 배율을 쓴다
         self._load_conf()
 
         self.setWindowTitle("메모  ·  ScreenPen")
@@ -1062,7 +1204,8 @@ class Memo(QWidget):
         lay.setSpacing(0)
         self.pin_box = QCheckBox("항상 띄워놓기")
         self.pin_box.setChecked(self.pinned)
-        self.pin_box.setStyleSheet("padding:6px 8px; background:#F4F4F6;")
+        self.pin_box.setStyleSheet("padding:%dpx %dpx; background:#F4F4F6;"
+                                   % (self.s(6), self.s(8)))
         self.pin_box.toggled.connect(self._on_pin)
         lay.addWidget(self.pin_box)
         line = QFrame()
@@ -1072,11 +1215,12 @@ class Memo(QWidget):
         self.text = MemoEdit()
         self.text.setAcceptDrops(True)
         self.text.setFrameShape(QFrame.NoFrame)
-        self.text.setStyleSheet("background:#FFFFFF; padding:8px;")
+        self.text.setStyleSheet("background:#FFFFFF; padding:%dpx;"
+                                % self.s(8))
         self._apply_font()
         lay.addWidget(self.text, 1)
 
-        self.setMinimumSize(self.MIN_W, self.MIN_H)
+        self.setMinimumSize(self.s(self.MIN_W), self.s(self.MIN_H))
         self._load()
         self.text.textChanged.connect(self._on_changed)
         self._save_timer = QTimer(self)
@@ -1085,22 +1229,64 @@ class Memo(QWidget):
         self._save_timer.timeout.connect(self.save)
         self.text.installEventFilter(self)
 
+    def s(self, n):
+        return int(round(n * self.ui))
+
+    def bar_screen(self):
+        """툴바가 놓인 모니터. 메모는 툴바를 따라간다."""
+        bar = self.app.bar
+        return screen_at(bar.x() + bar.BW // 2, bar.y() + bar.BH // 2)
+
     def place_default(self):
         """툴바 아래, 툴바 절반 크기의 정사각형. 메모 버튼과 가운데를 맞춘다."""
         bar = self.app.bar
+        a = self.bar_screen().availableGeometry()
         w = bar.BW // 2
-        y = bar.y() + bar.BH + 10
-        h = min(bar.BW // 2, VY + VH - y - 60)
+        y = bar.y() + bar.BH + self.s(10)
+        h = min(bar.BW // 2, a.y() + a.height() - y - self.s(60))
+        h = max(self.s(self.MIN_H), h)
         cx = bar.x() + bar.BW // 2
         for z in bar.zones:
             if z["id"] == "memo":
                 cx = bar.x() + (z["rect"][0] + z["rect"][2]) // 2
                 break
-        x = max(VX + 8, min(cx - w // 2, VX + VW - w - 8))
+        # 가상 데스크톱이 아니라 툴바가 놓인 모니터 한 대 안에 가둔다.
+        x, y = clamp_to_screen(cx - w // 2, y, w, h, self.bar_screen())
         # setGeometry 는 제목 표시줄을 뺀 안쪽을 잡아서 창이 위로 밀려 올라간다.
         # resize + move 를 써야 창 전체가 툴바 바로 아래에 놓인다.
-        self.resize(w, max(self.MIN_H, h))
+        self.resize(w, h)
         self.move(x, y)
+
+    def snap_into_screen(self):
+        """화면 밖에 남았으면 끌어온다."""
+        sc = screen_at(self.x() + self.width() // 2,
+                       self.y() + self.height() // 2)
+        x, y = clamp_to_screen(self.x(), self.y(),
+                               self.frameGeometry().width(),
+                               self.frameGeometry().height(), sc)
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
+
+    def nativeEvent(self, etype, msg):
+        """제목 표시줄로 끌 때 모니터 밖으로 못 나가게 막는다.
+
+        이 창은 Windows 기본 테두리를 쓰므로 이동을 Windows 가 처리한다.
+        Qt 의 moveEvent 로는 이미 옮겨진 뒤라 되돌리면 떨린다. WM_MOVING 이
+        놓을 자리를 묻는 단계라, 여기서 사각형을 고치면 애초에 안 나간다.
+        """
+        try:
+            r = wb.moving_rect(int(msg))
+            if r is not None:
+                w, h = r.right - r.left, r.bottom - r.top
+                sc = (QGuiApplication.screenAt(QCursor.pos())
+                      or self.screen())
+                x, y = clamp_to_screen(r.left, r.top, w, h, sc)
+                r.left, r.top = x, y
+                r.right, r.bottom = x + w, y + h
+                return True, 1
+        except Exception:
+            log("memo moving " + traceback.format_exc())
+        return super().nativeEvent(etype, msg)
 
     # ------------------------------------------------------------ 글자 크기
 
@@ -1113,12 +1299,74 @@ class Memo(QWidget):
         return False
 
     def bump_font(self, step):
-        size = max(self.FONT_MIN, min(self.FONT_MAX, self.font_size + step))
-        if size == self.font_size:
+        """Ctrl+휠. 고른 곳이 있으면 거기만, 없으면 문서 전체.
+
+        전체일 때도 한 크기로 뭉개지 않고 각 부분을 제 크기에서 한 단계씩
+        옮긴다. 제목만 크게 해 둔 메모를 전체 축소했더니 제목까지 본문 크기로
+        내려앉으면 서식을 잃는 것이다. 그림은 글자 크기와 무관하므로 건드리지
+        않는다.
+        """
+        cur = self.text.textCursor()
+        base = self.font_size
+        if cur.hasSelection():
+            self._bump_range(cur.selectionStart(), cur.selectionEnd(),
+                             step, base)
             return
-        self.font_size = size
-        self._apply_font()
-        self._save_conf()
+        size = max(self.FONT_MIN, min(self.FONT_MAX, base + step))
+        if size != base:
+            self.font_size = size          # 앞으로 칠 글자의 크기
+            f = QFont(UI_FONT_NAME, size)
+            self.text.setFont(f)
+            self._save_conf()
+        # base 는 크기를 올리기 '전' 값이어야 한다. 크기가 안 박힌 부분은
+        # 위젯 글꼴을 따르고 있었으므로, 새 값으로 재면 두 번 올라간다.
+        self._bump_range(0, self.text.document().characterCount() - 1,
+                         step, base)
+
+    def _bump_range(self, start, end, step, base):
+        """그 구간의 글자 크기를 저마다 한 단계씩 옮긴다.
+
+        같은 크기가 이어지는 덩어리로 묶어서 한 번에 입힌다. 한 글자씩
+        입히면 긴 글에서 느리다.
+        """
+        doc = self.text.document()
+        if end <= start:
+            return
+        c = QTextCursor(doc)
+
+        def size_at(i):
+            c.setPosition(i)
+            c.setPosition(i + 1, QTextCursor.KeepAnchor)
+            f = c.charFormat()
+            if f.isImageFormat():
+                return None                # 그림은 고정
+            pt = f.fontPointSize()
+            return pt if pt > 0 else float(base)
+
+        runs, i = [], start
+        while i < end:
+            size = size_at(i)
+            j = i + 1
+            while j < end and size_at(j) == size:
+                j += 1
+            runs.append((i, j, size))
+            i = j
+
+        edit = QTextCursor(doc)
+        edit.beginEditBlock()
+        for i, j, size in runs:
+            if size is None:
+                continue
+            want = max(self.FONT_MIN, min(self.FONT_MAX, size + step))
+            if want == size:
+                continue
+            edit.setPosition(i)
+            edit.setPosition(j, QTextCursor.KeepAnchor)
+            fmt = QTextCharFormat()
+            fmt.setFontPointSize(want)
+            edit.mergeCharFormat(fmt)
+        edit.endEditBlock()
+        self._on_changed()
 
     def _apply_font(self):
         font = QFont(UI_FONT_NAME, self.font_size)
@@ -1256,6 +1504,7 @@ class ScreenPenQt:
         self.overlay.show()
         wb.exclude_from_capture(int(self.overlay.winId()))
         self.overlay.hide()                # 통과 모드에서는 아예 감춘다
+        self._watch_screens()
 
         self._register_hotkeys()
         self.pump = QTimer()
@@ -1485,6 +1734,50 @@ class ScreenPenQt:
         if not self.board_mode and not self.input_mode:
             self.bar.refresh_glass()
         self.keep_bar_visible()
+
+    # ------------------------------------------------------------ 화면 구성
+
+    def _watch_screens(self):
+        """해상도나 모니터 구성이 바뀌면 크기와 자리를 다시 맞춘다.
+
+        VX~VH 는 import 할 때 한 번만 읽으므로, 다시 읽지 않으면 해상도를
+        바꾼 뒤 모든 배치 계산이 옛날 숫자를 쓴다. 해상도를 낮추면 툴바가
+        화면 밖에 남는 일도 생긴다.
+        """
+        qapp = QGuiApplication.instance()
+        for sig in (qapp.screenAdded, qapp.screenRemoved,
+                    qapp.primaryScreenChanged):
+            sig.connect(lambda *_a: self.on_screens_changed())
+        for sc in QGuiApplication.screens():
+            self._hook_screen(sc)
+        qapp.screenAdded.connect(self._hook_screen)
+        h = self.bar.windowHandle()
+        if h is not None:                  # 다른 DPI 의 모니터로 옮겼을 때
+            h.screenChanged.connect(lambda *_a: self.on_screens_changed())
+
+    def _hook_screen(self, sc):
+        try:
+            sc.geometryChanged.connect(lambda *_a: self.on_screens_changed())
+            sc.logicalDotsPerInchChanged.connect(
+                lambda *_a: self.on_screens_changed())
+        except Exception:
+            log("screen hook " + traceback.format_exc())
+
+    def on_screens_changed(self):
+        global VX, VY, VW, VH
+        try:
+            VX, VY, VW, VH = wb.virtual_screen()
+            self.overlay.setGeometry(VX, VY, VW, VH)
+            self.bar.rescale()
+            self.bar.snap_into_screen()
+            self.bar.refresh_glass()
+            if self.memo is not None:
+                self.memo.ui = self.bar.ui
+                self.memo.setMinimumSize(self.memo.s(Memo.MIN_W),
+                                         self.memo.s(Memo.MIN_H))
+                self.memo.snap_into_screen()
+        except Exception:
+            log("screens " + traceback.format_exc())
 
     def keep_bar_visible(self):
         """툴바는 화이트보드든 아니든 항상 보여야 한다.
