@@ -1591,13 +1591,14 @@ class ScreenPenQt:
             self.overlay.mapFromGlobal(self.overlay.cursor().pos()))
         r = max(1.0, self.width / 2.0)
         col = QColor(MARKER_YELLOW if self.tool == "marker" else self.color)
-        dot = QGraphicsEllipseItem(QRectF(pos.x() + 40, pos.y() - r, r * 2, r * 2))
+        left_x = pos.x() - 40 - r * 2
+        dot = QGraphicsEllipseItem(QRectF(left_x, pos.y() - r, r * 2, r * 2))
         dot.setBrush(QBrush(col))
         dot.setPen(QPen(QColor(FG_DIM), 1) if self.tool == "erase" else Qt.NoPen)
         txt = QGraphicsSimpleTextItem("%d pt" % self.width)
         txt.setFont(QFont(UI_FONT_NAME, 10, QFont.Bold))
         txt.setBrush(QBrush(QColor(FG)))
-        txt.setPos(pos.x() + 40, pos.y() + r + 4)
+        txt.setPos(left_x, pos.y() + r + 4)
         for it in (dot, txt):
             sc.addItem(it)
         self.hint_items = [dot, txt]
